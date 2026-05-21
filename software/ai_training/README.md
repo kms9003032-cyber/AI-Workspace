@@ -113,3 +113,116 @@ results 폴더에 자동 분류된 이미지를 그대로 학습에 사용하면
 - 실제 환경 적응성
 
 을 중요하게 고려한다.
+
+
+---
+
+# Local Automation System
+
+## 목적
+
+집 데스크탑에서 매일 자동으로 체스말 분류 AI를 학습하고,
+학습 결과와 랜덤 이미지 테스트 결과를 저장하기 위한 시스템이다.
+
+현재 목표는:
+
+- validation accuracy 추적
+- loss 추적
+- random image 테스트
+- unknown_or_empty 문제 분석
+- 장기적인 자동 개선 구조 구축
+
+이다.
+
+---
+
+# 자동 학습 실행 흐름
+
+```text
+run_training.bat 실행
+↓
+train_model_local.py 실행
+↓
+모델 학습
+↓
+training_results/history.csv 저장
+↓
+models/best_model.keras 저장
+↓
+evaluate_random_images.py 실행
+↓
+raw_dataset 랜덤 테스트
+↓
+training_results/random_test_results.csv 저장
+```
+
+---
+
+# 필요한 로컬 폴더 구조
+
+```text
+software/ai_training/
+├── dataset/
+│   ├── train/
+│   ├── validation/
+│   └── raw_dataset/
+├── models/
+├── training_results/
+├── train_model_local.py
+├── evaluate_random_images.py
+└── run_training.bat
+```
+
+---
+
+# 실행 방법
+
+Windows에서:
+
+```text
+run_training.bat
+```
+
+더블클릭.
+
+---
+
+# 중요 주의사항
+
+results 또는 random_test에 자동 분류된 이미지를
+그대로 학습에 사용하면 안 된다.
+
+반드시 사람이 직접 확인 후:
+
+- train/
+- validation/
+
+폴더로 옮긴 뒤 재학습해야 한다.
+
+---
+
+# 장기 목표
+
+향후 목표:
+
+- Windows 작업 스케줄러 기반 자동 학습
+- 매일 00:00 자동 실행
+- val_accuracy / loss 자동 분석
+- random_test_results.csv 자동 분석
+- n8n 기반 결과 분석
+- GitHub 기반 자동 개선 제안
+- AI Agent 기반 자동 연구 보조 시스템 구축
+
+---
+
+# 현재 우선 목표
+
+현재는:
+
+"완전 자동 AI"
+
+보다,
+
+"자동 학습 및 자동 분석 가능한 기반 구축"
+
+을 우선 목표로 한다.

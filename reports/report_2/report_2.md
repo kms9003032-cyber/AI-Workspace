@@ -53,7 +53,7 @@ Arduino 좌표 전달
 
 ## 최종 구조
 
-![Final Structure](images/final_structure.jpg)
+![Final Structure](images/final_structure.png)
 
 현재 시스템은 갠트리 기반 XY 이동 구조를 사용한다.
 
@@ -67,7 +67,7 @@ Arduino 좌표 전달
 
 ## 지브 구동부
 
-![Jib Drive](images/jib_drive.jpg)
+![Jib Drive](images/jib_drive.png)
 
 지브 구동부는:
 
@@ -84,7 +84,7 @@ Arduino 좌표 전달
 
 ## 트롤리 이동부
 
-![Trolley System](images/trolley_system.jpg)
+![Trolley System](images/trolley_system.png)
 
 트롤리 이동부는:
 
@@ -101,7 +101,7 @@ Arduino 좌표 전달
 
 ## Z축 이동부
 
-![Z Axis](images/z_axis_system.jpg)
+![Z Axis](images/z_axis_system.png)
 
 Z축은:
 
@@ -117,7 +117,7 @@ Z축은:
 
 ## 그리퍼 구동부
 
-![Gripper](images/gripper_system.jpg)
+![Gripper](images/gripper_system.png)
 
 그리퍼는:
 
@@ -136,7 +136,7 @@ Z축은:
 
 ## 응력 해석
 
-![Stress Analysis](images/stress_analysis_1.jpg)
+![Stress Analysis](images/stress_analysis_1.png)
 
 외팔보 구조 특성을 기반으로
 최대 응력 위치를 분석하였다.
@@ -148,7 +148,7 @@ Z축은:
 
 ## Von Mises 응력 및 안전계수
 
-![Stress Analysis 2](images/stress_analysis_2.jpg)
+![Stress Analysis 2](images/stress_analysis_2.png)
 
 최대 응력:
 124.06 MPa
@@ -165,7 +165,7 @@ Z축은:
 
 ## 변위 해석
 
-![Displacement](images/displacement_analysis.jpg)
+![Displacement](images/displacement_analysis.png)
 
 최대 변위:
 1.32 mm
@@ -188,7 +188,7 @@ Z축은:
 
 # 6. 데이터셋 구조
 
-![Dataset Structure](images/dataset_structure.jpg)
+![Dataset Structure](images/dataset_structure.png)
 
 현재 데이터셋은 다음 구조로 관리한다.
 
@@ -244,7 +244,7 @@ train/validation 폴더로 이동해야 한다.
 
 ## 데이터 증강
 
-![Augmentation](images/augmentation_code.jpg)
+![Augmentation](images/augmentation_code.png)
 
 현재 다음 증강 기법을 사용한다.
 
@@ -258,7 +258,7 @@ train/validation 폴더로 이동해야 한다.
 
 ## 모델 구조
 
-![MobileNet](images/mobilenet_structure.jpg)
+![MobileNet](images/mobilenet_structure.png)
 
 현재 MobileNetV2 기반 Transfer Learning 구조를 사용한다.
 
@@ -268,7 +268,7 @@ TensorFlow + Keras 기반으로 구현하였다.
 
 ## 학습 결과
 
-![Training Result](images/training_result.jpg)
+![Training Result](images/training_result.png)
 
 현재 validation accuracy는
 약 90% 이상 수준이다.
@@ -302,7 +302,7 @@ TensorFlow + Keras 기반으로 구현하였다.
 
 ## 체스판 인식
 
-![Camera Grid](images/camera_grid_system.jpg)
+![Camera Grid](images/camera_grid_system.png)
 
 상부 카메라는:
 
@@ -337,7 +337,7 @@ e7e5
 
 # 11. translation.py 좌표 변환
 
-![Translation](images/translation_system.jpg)
+![Translation](images/translation_system.png)
 
 translation.py는:
 

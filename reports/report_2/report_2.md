@@ -282,8 +282,6 @@ TensorFlow + Keras 기반으로 구현하였다.
 
 ## Empty Detection 문제
 
-![Empty Detection](images/empty_detection_issue.jpg)
-
 현재 빈 공간(empty)을
 기존 기물로 잘못 분류하는 문제가 존재한다.
 

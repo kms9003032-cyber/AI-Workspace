@@ -1,38 +1,31 @@
 ```python
+import os
+import pandas as pd
+import numpy as np
 import tensorflow as tf
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.applications import MobileNetV2
 from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout
 from tensorflow.keras.models import Model
 from tensorflow.keras.callbacks import ReduceLROnPlateau, CSVLogger, ModelCheckpoint
-import pandas as pd
-import numpy as np
 
-# 경로 설정
+# 데이터 경로 설정
 train_dir = 'data/train'
-valid_dir = 'data/valid'
+val_dir = 'data/val'
 test_dir = 'data/test'
-
-# 파라미터
-img_height, img_width = 224, 224
+img_height = 224
+img_width = 224
 batch_size = 32
-epochs = 100
 
-# 데이터 생성기
+# 데이터 증강 및 제너레이터 생성
 train_datagen = ImageDataGenerator(
     rescale=1./255,
     rotation_range=180,
     horizontal_flip=True,
     vertical_flip=True
 )
-
-valid_datagen = ImageDataGenerator(
-    rescale=1./255
-)
-
-test_datagen = ImageDataGenerator(
-    rescale=1./255
-)
+val_datagen = ImageDataGenerator(rescale=1./255)
+test_datagen = ImageDataGenerator(rescale=1./255)
 
 train_generator = train_datagen.flow_from_directory(
     train_dir,
@@ -40,14 +33,12 @@ train_generator = train_datagen.flow_from_directory(
     batch_size=batch_size,
     class_mode='categorical'
 )
-
-valid_generator = valid_datagen.flow_from_directory(
-    valid_dir,
+val_generator = val_datagen.flow_from_directory(
+    val_dir,
     target_size=(img_height, img_width),
     batch_size=batch_size,
     class_mode='categorical'
 )
-
 test_generator = test_datagen.flow_from_directory(
     test_dir,
     target_size=(img_height, img_width),
@@ -56,22 +47,17 @@ test_generator = test_datagen.flow_from_directory(
     shuffle=False
 )
 
-num_classes = train_generator.num_classes
+num_classes = len(train_generator.class_indices)
 
-# 모델 구축
-base_model = MobileNetV2(
-    weights='imagenet', 
-    include_top=False, 
-    input_shape=(img_height, img_width, 3)
-)
+# 모델 구성
+base_model = MobileNetV2(include_top=False, weights='imagenet', input_shape=(img_height, img_width, 3))
 base_model.trainable = True
 
 x = base_model.output
 x = GlobalAveragePooling2D()(x)
-x = Dropout(0.3)(x)
-output = Dense(num_classes, activation='softmax')(x)
-
-model = Model(inputs=base_model.input, outputs=output)
+x = Dropout(0.5)(x)
+predictions = Dense(num_classes, activation='softmax')(x)
+model = Model(inputs=base_model.input, outputs=predictions)
 
 model.compile(
     optimizer=tf.keras.optimizers.Adam(),
@@ -79,52 +65,49 @@ model.compile(
     metrics=['accuracy']
 )
 
-# 콜백
+# 콜백 설정
+checkpoint = ModelCheckpoint(
+    'best_model_colab.keras',
+    monitor='val_accuracy',
+    save_best_only=True,
+    mode='max',
+    verbose=1
+)
 reduce_lr = ReduceLROnPlateau(
-    monitor='val_loss', 
-    factor=0.2, 
-    patience=5, 
-    min_lr=1e-6, 
+    monitor='val_loss',
+    factor=0.2,
+    patience=5,
+    min_lr=1e-6,
     verbose=1
 )
 csv_logger = CSVLogger('history_colab.csv')
-checkpoint = ModelCheckpoint(
-    'best_model_colab.keras', 
-    monitor='val_accuracy', 
-    verbose=1, 
-    save_best_only=True, 
-    mode='max'
-)
 
-callbacks = [reduce_lr, csv_logger, checkpoint]
+callbacks = [checkpoint, reduce_lr, csv_logger]
 
-# 학습
+# 모델 학습
 history = model.fit(
     train_generator,
-    steps_per_epoch=len(train_generator),
-    validation_data=valid_generator,
-    validation_steps=len(valid_generator),
-    epochs=epochs,
+    epochs=100,
+    validation_data=val_generator,
     callbacks=callbacks
 )
 
-# 테스트
-model.load_weights('best_model_colab.keras')
+# 테스트 데이터 예측
 test_generator.reset()
-preds = model.predict(
-    test_generator, 
-    steps=len(test_generator), 
-    verbose=1
-)
-predicted_class_indices = np.argmax(preds, axis=1)
-true_class_indices = test_generator.classes
+pred_probs = model.predict(test_generator, verbose=1)
+pred_classes = np.argmax(pred_probs, axis=1)
+
 filenames = test_generator.filenames
+true_classes = test_generator.classes
 class_labels = list(test_generator.class_indices.keys())
 
 results_df = pd.DataFrame({
     'filename': filenames,
-    'actual': [class_labels[i] for i in true_class_indices],
-    'predicted': [class_labels[i] for i in predicted_class_indices]
+    'true_label': [class_labels[i] for i in true_classes],
+    'pred_label': [class_labels[i] for i in pred_classes],
+    'correct': (true_classes == pred_classes).astype(int)
 })
 results_df.to_csv('random_test_results.csv', index=False)
+
+# 학습 기록 저장 (CSVLogger가 이미 history_colab.csv를 저장함)
 ```

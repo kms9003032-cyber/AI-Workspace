@@ -1,132 +1,136 @@
 import os
-import numpy as np
 import pandas as pd
+import numpy as np
 import tensorflow as tf
+from tensorflow import keras
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
-from tensorflow.keras.applications import MobileNetV2
-from tensorflow.keras.layers import GlobalAveragePooling2D, Dense, Dropout
-from tensorflow.keras.models import Model, load_model
+from tensorflow.keras.applications.mobilenet_v2 import MobileNetV2, preprocess_input
+from tensorflow.keras.layers import Dense, Dropout, GlobalAveragePooling2D, BatchNormalization
+from tensorflow.keras.models import Model
 from tensorflow.keras.callbacks import ModelCheckpoint, CSVLogger, ReduceLROnPlateau, EarlyStopping
-from tensorflow.keras.optimizers import Adam
-from sklearn.utils.class_weight import compute_class_weight
-from sklearn.metrics import classification_report
 
-base_dir = "/content/drive/MyDrive/4조 응용 기초 설계/chess_piece_ai/dataset"
-train_dir = os.path.join(base_dir, "train")
-val_dir = os.path.join(base_dir, "val")
-random_test_dir = os.path.join(base_dir, "random_test")
-img_size = (224, 224)
-batch_size = 32
-epochs = 30
-init_lr = 1e-3
+base_dir = '/content/drive/MyDrive/4조 응용 기초 설계/chess_piece_ai/dataset'
+train_dir = os.path.join(base_dir, 'train')
+val_dir = os.path.join(base_dir, 'val')
+random_test_dir = os.path.join(base_dir, 'raw_dataset')
 
-train_aug = ImageDataGenerator(
-    rescale=1./255,
+BATCH_SIZE = 32
+IMG_SIZE = (224, 224)
+EPOCHS = 30
+
+train_datagen = ImageDataGenerator(
+    preprocessing_function=preprocess_input,
     rotation_range=180,
-    width_shift_range=0.10,
-    height_shift_range=0.10,
-    brightness_range=[0.5, 1.5],
-    shear_range=0.12,
-    zoom_range=0.18,
-    channel_shift_range=28.0,
+    width_shift_range=0.15,
+    height_shift_range=0.15,
+    shear_range=0.15,
+    zoom_range=0.2,
+    brightness_range=(0.55, 1.5),
+    channel_shift_range=35.0,
     horizontal_flip=True,
     vertical_flip=True,
-    fill_mode="nearest"
+    fill_mode='nearest'
 )
-val_aug = ImageDataGenerator(rescale=1./255)
-train_gen = train_aug.flow_from_directory(
+
+val_datagen = ImageDataGenerator(
+    preprocessing_function=preprocess_input
+)
+
+train_generator = train_datagen.flow_from_directory(
     train_dir,
-    target_size=img_size,
-    batch_size=batch_size,
-    class_mode="categorical",
+    target_size=IMG_SIZE,
+    batch_size=BATCH_SIZE,
+    class_mode='categorical',
     shuffle=True
 )
-val_gen = val_aug.flow_from_directory(
+
+val_generator = val_datagen.flow_from_directory(
     val_dir,
-    target_size=img_size,
-    batch_size=batch_size,
-    class_mode="categorical",
+    target_size=IMG_SIZE,
+    batch_size=BATCH_SIZE,
+    class_mode='categorical',
     shuffle=False
 )
-class_labels = list(train_gen.class_indices.keys())
-n_classes = len(class_labels)
-labels = train_gen.classes
-cw = compute_class_weight(
-    "balanced",
-    classes=np.arange(n_classes),
-    y=labels
-)
-class_weights = {i: w for i, w in enumerate(cw)}
-if "unknown_or_empty" in train_gen.class_indices:
-    unknown_idx = train_gen.class_indices["unknown_or_empty"]
-    class_weights[unknown_idx] = class_weights[unknown_idx] * 1.7
 
-base_model = MobileNetV2(
-    input_shape=img_size + (3,),
-    include_top=False,
-    weights="imagenet"
-)
+from collections import Counter
+train_classes = train_generator.classes
+counter = Counter(train_classes)
+max_c = max(counter.values())
+class_weight = {i: max_c / c for i, c in counter.items()}
+
+base_model = MobileNetV2(input_shape=IMG_SIZE + (3,), include_top=False, weights='imagenet')
 for layer in base_model.layers[:-30]:
     layer.trainable = False
 for layer in base_model.layers[-30:]:
     layer.trainable = True
+
 x = base_model.output
 x = GlobalAveragePooling2D()(x)
-x = Dropout(0.4)(x)
-out = Dense(n_classes, activation="softmax", kernel_regularizer=tf.keras.regularizers.l2(0.002))(x)
-model = Model(base_model.input, out)
-model.compile(
-    optimizer=Adam(learning_rate=init_lr),
-    loss="categorical_crossentropy",
-    metrics=["accuracy"]
-)
+x = BatchNormalization()(x)
+x = Dropout(0.5)(x)
+x = Dense(128, activation='relu')(x)
+x = BatchNormalization()(x)
+x = Dropout(0.35)(x)
+output = Dense(train_generator.num_classes, activation='softmax')(x)
 
-checkpoint_best = ModelCheckpoint(
-    os.path.join(base_dir, "best_model_colab.keras"),
-    monitor="val_accuracy",
+model = Model(inputs=base_model.input, outputs=output)
+
+optimizer = keras.optimizers.Adam(learning_rate=2e-4)
+model.compile(optimizer=optimizer, loss='categorical_crossentropy', metrics=['accuracy'])
+
+checkpoint_cb = ModelCheckpoint(
+    'best_model_colab.keras',
+    monitor='val_accuracy',
     save_best_only=True,
-    mode="max",
+    mode='max',
+    save_weights_only=False,
     verbose=1
 )
-checkpoint_final = ModelCheckpoint(
-    os.path.join(base_dir, "final_model_colab.keras"),
-    save_best_only=False,
-    save_freq="epoch",
-    verbose=0
+csv_logger_cb = CSVLogger('history_colab.csv')
+reduce_lr_cb = ReduceLROnPlateau(
+    monitor='val_loss',
+    factor=0.5,
+    patience=2,
+    verbose=1,
+    min_lr=5e-6
 )
-csv_logger = CSVLogger(os.path.join(base_dir, "history_colab.csv"))
-reduce_lr = ReduceLROnPlateau(
-    monitor="val_loss", factor=0.5, patience=5, min_lr=1e-6, verbose=1
+earlystop_cb = EarlyStopping(
+    monitor='val_loss',
+    patience=5,
+    restore_best_weights=True,
+    verbose=1
 )
-early_stop = EarlyStopping(
-    monitor="val_loss", patience=5, restore_best_weights=True, verbose=1
-)
-callbacks = [checkpoint_best, checkpoint_final, csv_logger, reduce_lr, early_stop]
+callbacks = [checkpoint_cb, csv_logger_cb, reduce_lr_cb, earlystop_cb]
 
 history = model.fit(
-    train_gen,
-    validation_data=val_gen,
-    epochs=epochs,
-    class_weight=class_weights,
+    train_generator,
+    epochs=EPOCHS,
+    validation_data=val_generator,
+    class_weight=class_weight,
     callbacks=callbacks,
-    verbose=1
+    verbose=2
 )
 
-model = load_model(os.path.join(base_dir, "best_model_colab.keras"))
+model.save('final_model_colab.keras')
 
-random_gen = val_aug.flow_from_directory(
+val_hist_df = pd.DataFrame(history.history)
+val_hist_df.to_csv('history_colab.csv', index=False)
+
+test_generator = val_datagen.flow_from_directory(
     random_test_dir,
-    target_size=img_size,
-    batch_size=1,
-    class_mode="categorical",
+    target_size=IMG_SIZE,
+    batch_size=BATCH_SIZE,
+    class_mode='categorical',
     shuffle=False
 )
-steps = random_gen.samples
-preds = model.predict(random_gen, steps=steps, verbose=1)
-pred_labels = np.argmax(preds, axis=1)
-true_labels = random_gen.classes
-report = classification_report(
-    true_labels, pred_labels, target_names=random_gen.class_indices.keys(), output_dict=True
-)
-report_df = pd.DataFrame(report).transpose()
-report_df.to_csv(os.path.join(base_dir, "random_test_results.csv"))
+
+test_loss, test_acc = model.evaluate(test_generator, verbose=2)
+pred_probs = model.predict(test_generator, verbose=2)
+pred_labels = np.argmax(pred_probs, axis=1)
+true_labels = test_generator.classes
+
+from sklearn.metrics import classification_report
+target_names = list(test_generator.class_indices.keys())
+report = classification_report(true_labels, pred_labels, target_names=target_names, output_dict=True)
+df_report = pd.DataFrame(report).transpose()
+df_report.to_csv('random_test_results.csv')

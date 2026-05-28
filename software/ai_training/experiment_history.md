@@ -1,219 +1,172 @@
-아래 분석과 코드는 아래와 같은 체스말 분류 문제에 효과적으로 대응하기 위해 작성되었습니다.
+물론입니다! 아래 두 파일(`history_colab.csv`, `random_test_results.csv`)에 대한 분석이 필요하므로 파일을 첨부하거나 그 내용을 제공해 주셔야 분석이 가능합니다.
+
+아직 파일 내용을 알지 못하므로, 아래는 **전형적인 분석 결과 예시**와, **지시하신 목표를 모두 반영한 개선된 코드(Colab용, train_model_colab_next.py)**를 먼저 드립니다.
+
+### [REPORT]  
+#### 1. 학습 결과 분석  
+_val_accuracy_, _val_loss_ 및 _unknown_or_empty_ 관련 주요 패턴은 다음과 같이 추정됩니다(실제 csv 내용 없이 일반적인 체스말 분류 상황 기준 예시):
+
+- **Train/Val Accuracy 차이**: 최종 val_accuracy가 일정 수준(예: 0.88)에서 더 이상 향상되지 않고, train accuracy와 차이가 큼 → 과적합 존재.
+- **Val Loss 변동성**: val_loss가 간헐적으로 증가하거나 안정적으로 감소하지 않음 → 데이터 다변화 혹은 regularization 방안 부족.
+- **Unknown/Empty 오분류**: random_test_results.csv에서 unknown/empty 라벨에 대한 오분류율이 높음 → 알려진 말과 기타 상황 구분이 부정확.
+- **실제 그리퍼 카메라 환경**: 랜덤데이터 정확도가 낮거나 예외상황(손, 빛 번짐 등)에 취약.
+
+#### 2. 개선 실험 설계 이유
+- MobileNetV2의 사전학습 가중치 이용해 일반화 성능 확보.
+- Data augmentation(회전, 밝기, shift 등) 강화하여 실제 환경 대응력 및 unknown/empty 구분력 증가.
+- Dropout/Regularization 도입 및 EarlyStopping로 과적합 방지.  
+- ReduceLROnPlateau로 LR 자동 조절해 val_loss 안정화.
+- `class_mode='categorical'`로 unknown, empty 등 복수 클래스 대응.
+- validation set 분리를 확실히 하여 실성능 반영.
+- `random_test_results.csv`에 test 시 unknown/empty 예측력 별도 저장.
 
 ---
 
-# [REPORT]
+### [CODE]  
+아래 코드를 `train_model_colab_next.py`로 저장하여 사용 가능합니다.  
+핵심 하이퍼파라미터(증강, 모델, 콜백 등)도 표준 이상으로 조정되어 있습니다.
 
-## 1. 데이터 및 현재 결과 분석
-
-### **history_colab.csv**
-- **val_accuracy**: 훈련 정확도보다 상대적으로 낮거나 변동폭이 심하다면 overfitting 징후.
-- **val_loss**: 불안정한 경우, 모델의 일반화 성능이 낮음. 학습률, 모델 복잡도, regularization 등 개선 필요.
-- **unknown_or_empty**: unknown, empty 클래스를 혼동/미인식하는 경우가 많다. 실제 환경(조명, 각도, 배경)에서 분포가 다를 수 있음.
-
-### **random_test_results.csv**
-- 랜덤 샘플에서 성능 하락이 관찰된다면, 실제 카메라 환경 적응력이 부족함을 의미.  
-- 특정 클래스의 recall/precision이 낮다면 데이터 불균형, overfitting 원인일 수 있음.
-
----
-
-## 2. 다음 실험 설계 이유
-
-### 대표 개선 전략
-
-- **val_accuracy 향상/val_loss 안정화**:  
-  - `ReduceLROnPlateau`로 validation 성능 정체 시 학습률 자동 감소.
-  - data augmentation 다양화(색 변화, noise 등) 및 dropout, batch normalization 추가.
-- **unknown_or_empty 개선**:  
-  - 클래스 균형을 위한 oversampling이나 class_weight 적용.
-  - augmentation을 특히 empty, unknown 쪽에 강화.
-- **실제 카메라 환경 대응**:  
-  - 랜덤한 augmentation(조명, blur, 변형 등) 추강.
-  - random_test_results로 직접 평가/저장.  
-- **과적합 방지**:  
-  - 모델 단순화, 과한 에폭 제한, dropout, early stopping(모델 checkpoint), aggressive aug 등.
-
----
-
-## 3. 실험 주요 변경점
-
-- **데이터 파이프라인**: `ImageDataGenerator`에 밝기, 노이즈, 회전, shift 등 강한 augmentation. empty/unknown 데이터가 부족하면, train/val에서 각각 비율 유지.
-- **모델**: MobileNetV2 (pretrained, fine-tuning layer 조절)
-- **callback**: `ModelCheckpoint`, `CSVLogger`, `ReduceLROnPlateau`
-- **과적합 방지**: dropout 추가, EPOCH 적정 제한(30~50).
-- **random_test_results**: test 데이터셋 사용해서 별도 평가.
-
----
-
-# [CODE]
 ```python
 import os
 import pandas as pd
 import numpy as np
 import tensorflow as tf
-from tensorflow import keras
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
-from tensorflow.keras.applications.mobilenet_v2 import MobileNetV2, preprocess_input
-from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout, BatchNormalization
+from tensorflow.keras.applications import MobileNetV2
+from tensorflow.keras.layers import GlobalAveragePooling2D, Dropout, Dense
 from tensorflow.keras.models import Model
-from tensorflow.keras.callbacks import ModelCheckpoint, CSVLogger, ReduceLROnPlateau
+from tensorflow.keras.callbacks import ModelCheckpoint, CSVLogger, ReduceLROnPlateau, EarlyStopping
 
-# Set base_dir and dataset paths
-base_dir = '/content/chess_dataset'
+# == 기본 경로 지정 ==
+base_dir = '/content/chess_data'     # 필요에 따라 수정
 train_dir = os.path.join(base_dir, 'train')
 val_dir = os.path.join(base_dir, 'val')
 random_test_dir = os.path.join(base_dir, 'random_dataset')
 
-BATCH_SIZE = 32
-IMG_SIZE = (224, 224)
-EPOCHS = 40
+img_height, img_width = 224, 224
+batch_size = 32
+num_classes = len(os.listdir(train_dir))
 
-# Data Augmentation for real camera robustness
+# == 데이터 증강: 실제 환경 대응력 강화를 위해 확장 ==
 train_datagen = ImageDataGenerator(
-    preprocessing_function=preprocess_input,
-    rotation_range=25,
-    width_shift_range=0.15,
-    height_shift_range=0.15,
-    zoom_range=0.15,
-    brightness_range=(0.6, 1.4),
-    shear_range=0.1,
+    rescale=1./255,
+    rotation_range=35,
+    width_shift_range=0.2,
+    height_shift_range=0.2,
+    brightness_range=(0.8, 1.2),
+    shear_range=0.15,
+    zoom_range=0.2,
     horizontal_flip=True,
-    vertical_flip=True,  # 추가로 실제 환경 적용
+    vertical_flip=True,
     fill_mode='nearest'
 )
 
-val_datagen = ImageDataGenerator(
-    preprocessing_function=preprocess_input
-)
+val_datagen = ImageDataGenerator(rescale=1./255)
 
-# Train/Validation Generators
 train_generator = train_datagen.flow_from_directory(
     train_dir,
-    target_size=IMG_SIZE,
-    batch_size=BATCH_SIZE,
+    target_size=(img_height, img_width),
+    batch_size=batch_size,
     class_mode='categorical',
     shuffle=True
 )
+
 val_generator = val_datagen.flow_from_directory(
     val_dir,
-    target_size=IMG_SIZE,
-    batch_size=BATCH_SIZE,
+    target_size=(img_height, img_width),
+    batch_size=batch_size,
     class_mode='categorical',
     shuffle=False
 )
 
-# # Identify class imbalance
-# Consider applying class_weight if unknown/empty is underrepresented
-from collections import Counter
-counter = Counter(train_generator.classes)
-max_count = max(counter.values())
-class_weight = {i: max_count/count for i, count in counter.items()}
-
-# Build MobileNetV2 Model
-base_model = MobileNetV2(input_shape=IMG_SIZE + (3,), include_top=False, weights='imagenet')
-base_model.trainable = False  # For transfer learning, Fine-tune later
+# == 모델 구성 ==
+base_model = MobileNetV2(include_top=False, input_shape=(img_height, img_width, 3), weights='imagenet')
+base_model.trainable = False  # 피쳐 추출기로 활용, 이후 fine-tuning 고려
 
 x = base_model.output
 x = GlobalAveragePooling2D()(x)
-x = BatchNormalization()(x)
-x = Dropout(0.4)(x)
-x = Dense(128, activation='relu')(x)
-x = BatchNormalization()(x)
-x = Dropout(0.3)(x)
-predictions = Dense(train_generator.num_classes, activation='softmax')(x)
+x = Dropout(0.5)(x)
+outputs = Dense(num_classes, activation='softmax')(x)
+model = Model(inputs=base_model.input, outputs=outputs)
 
-model = Model(inputs=base_model.input, outputs=predictions)
+model.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=0.0007),
+    loss='categorical_crossentropy',
+    metrics=['accuracy']
+)
 
-# Compile model
-optimizer = keras.optimizers.Adam(learning_rate=1e-3)
-model.compile(optimizer=optimizer,
-              loss='categorical_crossentropy',
-              metrics=['accuracy'])
+# == 콜백 ==
+checkpoint = ModelCheckpoint(
+    'best_mobilenetv2_chess_model.h5',
+    save_best_only=True,
+    save_weights_only=False,
+    monitor='val_accuracy',
+    mode='max',
+    verbose=1
+)
+csv_logger = CSVLogger('history_colab.csv', append=False)
+reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, verbose=1, min_lr=1e-5)
+early_stop = EarlyStopping(monitor='val_accuracy', patience=8, restore_best_weights=True, verbose=1)
 
-# Callbacks
-checkpoint_cb = ModelCheckpoint(
-    'best_model.h5', monitor='val_accuracy', verbose=1,
-    save_best_only=True, mode='max')
-csv_logger_cb = CSVLogger('history_colab.csv')
-reduce_lr_cb = ReduceLROnPlateau(
-    monitor='val_loss', factor=0.5, patience=3,
-    verbose=2, min_lr=1e-5)
-
-callbacks = [checkpoint_cb, csv_logger_cb, reduce_lr_cb]
-
-# Train the model (first stage: head only)
+# == 학습 ==
 history = model.fit(
     train_generator,
-    epochs=EPOCHS,
+    steps_per_epoch=train_generator.samples // batch_size,
+    epochs=40,
     validation_data=val_generator,
-    class_weight=class_weight,
-    callbacks=callbacks
+    validation_steps=val_generator.samples // batch_size,
+    callbacks=[checkpoint, csv_logger, reduce_lr, early_stop]
 )
 
-# Optionally fine-tune (second stage)
-base_model.trainable = True
-optimizer_finetune = keras.optimizers.Adam(learning_rate=1e-4)
-model.compile(optimizer=optimizer_finetune,
-              loss='categorical_crossentropy',
-              metrics=['accuracy'])
+# == history_colab.csv 저장 (이미 CSVLogger가 저장) ==
+# 이미 저장됨. 추가로 DataFrame으로 직접 저장하려면 아래 코드 사용
+# pd.DataFrame(history.history).to_csv('history_colab.csv', index=False)
 
-history_fine = model.fit(
-    train_generator,
-    epochs=8,
-    validation_data=val_generator,
-    class_weight=class_weight,
-    callbacks=callbacks
-)
-
-# Save final history to CSV (append/merge if secondary phase)
-def merge_histories(history_list):
-    dfs = []
-    for h in history_list:
-        df = pd.DataFrame(h.history)
-        dfs.append(df)
-    return pd.concat(dfs, ignore_index=True)
-
-full_history = merge_histories([history, history_fine])
-full_history.to_csv('history_colab.csv', index=False)
-
-# Evaluate on random_dataset (_test_ in actual camera environment)
-random_test_gen = val_datagen.flow_from_directory(
+# == random_dataset 평가 및 결과 저장 ==
+random_test_generator = val_datagen.flow_from_directory(
     random_test_dir,
-    target_size=IMG_SIZE,
-    batch_size=BATCH_SIZE,
+    target_size=(img_height, img_width),
+    batch_size=1,
     class_mode='categorical',
     shuffle=False
 )
-eval_result = model.evaluate(random_test_gen, verbose=1)
-pred_probs = model.predict(random_test_gen, verbose=1)
-pred_labels = np.argmax(pred_probs, axis=1)
-true_labels = random_test_gen.classes
 
-# Calculate per-class accuracy, confusion, unknown_or_empty 개선 상황 분석
-from sklearn.metrics import classification_report, confusion_matrix
+random_test_steps = random_test_generator.samples
+pred_proba = model.predict(random_test_generator, steps=random_test_steps, verbose=1)
+pred_indices = np.argmax(pred_proba, axis=1)
+true_indices = random_test_generator.classes
+class_labels = list(random_test_generator.class_indices.keys())
 
-target_names = list(random_test_gen.class_indices.keys())
-report = classification_report(true_labels, pred_labels, target_names=target_names, output_dict=True)
-conf_matrix = confusion_matrix(true_labels, pred_labels)
+results = {
+    'filename': random_test_generator.filenames,
+    'true_label': [class_labels[i] for i in true_indices],
+    'pred_label': [class_labels[i] for i in pred_indices],
+    'correct': (pred_indices == true_indices).astype(int)
+}
+# 추후 unknown/empty 분류 분석을 위해
+results_df = pd.DataFrame(results)
 
-# Save detailed test results
-df_report = pd.DataFrame(report).transpose()
-df_report.to_csv('random_test_results.csv')
-# For extra insight (optional):
-# pd.DataFrame(conf_matrix, columns=target_names, index=target_names).to_csv('random_test_confusion.csv')
+# unknown, empty 오분류율 계산을 별도로 기록
+for label in ['unknown', 'empty']:
+    if label in class_labels:
+        mask = results_df['true_label'] == label
+        acc = (results_df[mask]['true_label'] == results_df[mask]['pred_label']).mean()
+        print(f'{label} accuracy: {acc:.4f}')
 
-print("Evaluation Results (accuracy, loss):", eval_result)
-print("Classification Report saved to random_test_results.csv")
+results_df.to_csv('random_test_results.csv', index=False)
+
+print('학습 및 평가 완료. 파일 저장됨: history_colab.csv, random_test_results.csv')
 ```
+
+### 코드 설명
+- **증강**: 밝기, 회전, 플립, 쉐어, 확대·축소, 이동 등 강력 적용
+- **MobileNetV2**: 사전학습, 글로벌풀링+Dropout(0.5)
+- **콜백**: ModelCheckpoint, ReduceLROnPlateau, CSVLogger, EarlyStopping
+- **CSVLogger**: history_colab.csv 자동작성
+- **test 평가**: true/pred/정오표 random_test_results.csv 저장, unknown/empty 클래스 따로 표시
+- **업로드/Drive 마운트 코드 일절 없음**
 
 ---
 
-**설명:**  
-- **강화된 augmentation**으로 일반화와 unknown/empty robustness 개선을 겨냥
-- **class_weight 적용**으로 불균형(특히 empty/unknown)에 대응
-- **ReduceLROnPlateau**와 **dropout**, **batch norm** 등 안정화 및 과적합 방지 적용
-- **random_dataset** 평가 및 **csv 저장**  
-- **history_colab.csv**: 전체 학습 내역 저장  
-- **random_test_results.csv**: per-class 리포트, unknown/empty 개선 직접 확인
-
-필요시, fine-tune 단계나 augmentation 강도, layer unfreeze 비율 등 추가 조정하며 실험 반복을 권장합니다.
+**실제 history_colab.csv, random_test_results.csv 내역이 있으면 제공바랍니다.  
+필요시 맞춤형 분석 결과로 보고서를 업데이트해드릴 수 있습니다!**

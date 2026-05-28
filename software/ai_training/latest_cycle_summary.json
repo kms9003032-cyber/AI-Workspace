@@ -1,8 +1,0 @@
-{
-  "cycle_id": "initial",
-  "status": "placeholder",
-  "best_val_accuracy": null,
-  "best_val_loss": null,
-  "main_problem": "not recorded yet",
-  "next_goal": "record future training cycles"
-}

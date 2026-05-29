@@ -1,115 +1,138 @@
 import os
-import numpy as np
 import pandas as pd
+import numpy as np
 import tensorflow as tf
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.applications import MobileNetV2
-from tensorflow.keras.layers import GlobalAveragePooling2D, Dropout, Dense
+from tensorflow.keras.layers import Dense, Dropout, GlobalAveragePooling2D
 from tensorflow.keras.models import Model
 from tensorflow.keras.callbacks import ModelCheckpoint, CSVLogger, ReduceLROnPlateau
+from sklearn.utils.class_weight import compute_class_weight
+from sklearn.metrics import classification_report
 
 base_dir = '/content/drive/MyDrive/4조 응용 기초 설계/chess_piece_ai/dataset'
 train_dir = os.path.join(base_dir, 'train')
 val_dir = os.path.join(base_dir, 'val')
 random_test_dir = os.path.join(base_dir, 'raw_dataset')
 
-img_height, img_width = 224, 224
-batch_size = 32
+BATCH_SIZE = 32
+IMAGE_SIZE = (224, 224)
+SEED = 42
+EPOCHS = 100
 
-num_classes = len([name for name in os.listdir(train_dir) if os.path.isdir(os.path.join(train_dir, name))])
-
-train_datagen = ImageDataGenerator(
+train_aug = ImageDataGenerator(
     rescale=1./255,
     rotation_range=180,
-    width_shift_range=0.15,
-    height_shift_range=0.15,
-    brightness_range=[0.6, 1.4],
     shear_range=0.18,
-    zoom_range=0.28,
-    channel_shift_range=48,
+    zoom_range=[0.8, 1.2],
+    width_shift_range=0.18,
+    height_shift_range=0.18,
+    brightness_range=[0.65, 1.35],
+    channel_shift_range=15.0,
     horizontal_flip=True,
     vertical_flip=True,
     fill_mode='nearest'
 )
 
-val_datagen = ImageDataGenerator(rescale=1./255)
+val_aug = ImageDataGenerator(rescale=1./255)
 
-train_generator = train_datagen.flow_from_directory(
+train_gen = train_aug.flow_from_directory(
     train_dir,
-    target_size=(img_height, img_width),
-    batch_size=batch_size,
+    target_size=IMAGE_SIZE,
+    batch_size=BATCH_SIZE,
     class_mode='categorical',
-    shuffle=True
+    shuffle=True,
+    seed=SEED
 )
 
-val_generator = val_datagen.flow_from_directory(
+val_gen = val_aug.flow_from_directory(
     val_dir,
-    target_size=(img_height, img_width),
-    batch_size=batch_size,
+    target_size=IMAGE_SIZE,
+    batch_size=BATCH_SIZE,
     class_mode='categorical',
-    shuffle=False
+    shuffle=False,
+    seed=SEED
 )
 
-base_model = MobileNetV2(include_top=False, input_shape=(img_height, img_width, 3), weights='imagenet')
+class_indices = train_gen.class_indices
+classes = list(class_indices.keys())
+labels = []
+for klass in classes:
+    labels += [klass] * len(os.listdir(os.path.join(train_dir, klass)))
+label_to_index = {label: idx for idx, label in enumerate(classes)}
+y = [label_to_index[label] for label in labels]
+class_weights = compute_class_weight('balanced', classes=np.arange(len(classes)), y=y)
+class_weights = dict(enumerate(class_weights))
+
+base_model = MobileNetV2(include_top=False, weights='imagenet', input_shape=(224,224,3))
 base_model.trainable = True
 
-x = base_model.output
-x = GlobalAveragePooling2D()(x)
-x = Dropout(0.55)(x)
-output = Dense(num_classes, activation='softmax')(x)
+x = GlobalAveragePooling2D()(base_model.output)
+x = Dropout(0.5)(x)
+output = Dense(len(classes), activation='softmax')(x)
 model = Model(inputs=base_model.input, outputs=output)
 
 model.compile(
-    optimizer=tf.keras.optimizers.Adam(learning_rate=0.00055),
+    optimizer=tf.keras.optimizers.Adam(learning_rate=3e-4),
     loss='categorical_crossentropy',
     metrics=['accuracy']
 )
 
-checkpoint = ModelCheckpoint(
-    'best_model_colab.keras',
+cp_dir = '/content/drive/MyDrive/4조 응용 기초 설계/chess_piece_ai'
+best_model_path = os.path.join(cp_dir, 'best_model_colab.keras')
+final_model_path = os.path.join(cp_dir, 'final_model_colab.keras')
+
+mcp = ModelCheckpoint(
+    best_model_path,
     monitor='val_accuracy',
     save_best_only=True,
     save_weights_only=False,
-    mode='max',
     verbose=1
 )
-csv_logger = CSVLogger('history_colab.csv', append=False)
-reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.45, patience=5, min_lr=1e-6, verbose=1)
+
+csv_logger = CSVLogger(os.path.join(cp_dir, 'history_colab.csv'), append=False)
+
+reduce_lr = ReduceLROnPlateau(
+    monitor='val_loss',
+    factor=0.35,
+    patience=4,
+    min_lr=3e-6,
+    verbose=1
+)
 
 history = model.fit(
-    train_generator,
-    epochs=100,
-    steps_per_epoch=(train_generator.samples // batch_size) + 1,
-    validation_data=val_generator,
-    validation_steps=(val_generator.samples // batch_size) + 1,
-    callbacks=[checkpoint, csv_logger, reduce_lr]
+    train_gen,
+    epochs=EPOCHS,
+    validation_data=val_gen,
+    class_weight=class_weights,
+    callbacks=[mcp, csv_logger, reduce_lr]
 )
 
-model.save('final_model_colab.keras')
+model.save(final_model_path)
 
-raw_generator = val_datagen.flow_from_directory(
+# 랜덤 평가 셋 예측 및 결과 저장
+random_test_gen = val_aug.flow_from_directory(
     random_test_dir,
-    target_size=(img_height, img_width),
+    target_size=IMAGE_SIZE,
     batch_size=1,
     class_mode='categorical',
-    shuffle=False
+    shuffle=False,
+    seed=SEED
 )
+model_best = tf.keras.models.load_model(best_model_path)
+preds = model_best.predict(random_test_gen, verbose=1)
+y_true = random_test_gen.classes
+y_pred = np.argmax(preds, axis=1)
+class_labels = list(random_test_gen.class_indices.keys())
+report = classification_report(
+    y_true,
+    y_pred,
+    target_names=class_labels,
+    output_dict=True,
+    zero_division=0
+)
+report_df = pd.DataFrame(report).transpose()
+report_df.to_csv(os.path.join(cp_dir, 'random_test_results.csv'))
 
-y_pred_prob = model.predict(raw_generator, steps=raw_generator.samples, verbose=1)
-y_pred = np.argmax(y_pred_prob, axis=1)
-y_true = raw_generator.classes
-label_map = {v: k for k, v in raw_generator.class_indices.items()}
-results = []
-for idx, (filename, true_idx, pred_idx) in enumerate(zip(raw_generator.filenames, y_true, y_pred)):
-    true_label = label_map[true_idx]
-    pred_label = label_map[pred_idx]
-    confidence = float(np.max(y_pred_prob[idx]))
-    results.append({
-        'filename': filename,
-        'true_label': true_label,
-        'pred_label': pred_label,
-        'confidence': confidence,
-        'correct': int(true_idx == pred_idx)
-    })
-results_df = pd.DataFrame(results)
-results_df.to_csv('random_test_results.csv', index=False)
+hist_df = pd.DataFrame(history.history)
+hist_df.to_csv(os.path.join(cp_dir, 'history_colab.csv'), index=False)

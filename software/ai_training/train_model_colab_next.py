@@ -1,219 +1,143 @@
 import os
-import pandas as pd
 import numpy as np
+import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
-from tensorflow.keras.applications import MobileNetV2
-from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout, BatchNormalization, Input
+from tensorflow.keras.layers import GlobalAveragePooling2D, Dropout, Dense
 from tensorflow.keras.models import Model
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import ModelCheckpoint, CSVLogger, ReduceLROnPlateau, EarlyStopping
-
-from sklearn.utils.class_weight import compute_class_weight
-from sklearn.metrics import classification_report, confusion_matrix, f1_score, precision_score, recall_score
-
-import cv2
+from tensorflow.keras.applications import MobileNetV2
+from tensorflow.keras.callbacks import ModelCheckpoint, CSVLogger, ReduceLROnPlateau
 
 base_dir = '/content/drive/MyDrive/4조 응용 기초 설계/chess_piece_ai/dataset'
 train_dir = os.path.join(base_dir, 'train')
 val_dir = os.path.join(base_dir, 'val')
 raw_dataset_dir = os.path.join(base_dir, 'raw_dataset')
+best_model_path = os.path.join(base_dir, 'best_model_colab.keras')
+final_model_path = os.path.join(base_dir, 'final_model_colab.keras')
+csv_logger_path = os.path.join(base_dir, 'history_colab.csv')
+random_test_result_csv = os.path.join(base_dir, 'random_test_results.csv')
 
-img_height, img_width = 224, 224
+img_size = (224, 224)
 batch_size = 32
-epochs = 100
-seed = 44
+seed = 77
 
-classes = sorted(next(os.walk(train_dir))[1])
-num_classes = len(classes)
-
-train_labels = []
-for class_name in classes:
-    class_path = os.path.join(train_dir, class_name)
-    train_labels += [class_name] * len(os.listdir(class_path))
-class_weights = compute_class_weight('balanced', classes=np.array(classes), y=np.array(train_labels))
-class_weights_dict = dict(enumerate(class_weights))
-
-def gaussian_noise(img):
-    if np.random.rand() < 0.5:
-        noise = np.random.normal(0, 0.03, img.shape)
-        img = np.clip(img + noise, 0., 1.)
+def gripper_style_augmentation(img):
+    img = tf.image.random_brightness(img, max_delta=0.27)
+    img = tf.image.random_contrast(img, 0.65, 1.35)
+    img = tf.image.random_hue(img, 0.035)
+    img = tf.image.random_saturation(img, 0.6, 1.4)
+    if tf.random.uniform(()) > 0.5:
+        img = tf.image.random_jpeg_quality(img, 65, 100)
+    if tf.random.uniform(()) > 0.7:
+        img = tf.image.stateless_random_crop(img, size=[int(img_size[0]*0.92), int(img_size[1]*0.92), 3], seed=[seed, seed])
+        img = tf.image.resize(img, img_size)
+    noise = tf.random.normal(shape=tf.shape(img), mean=0.0, stddev=0.015)
+    img = img + noise
+    img = tf.clip_by_value(img, 0.0, 1.0)
     return img
-
-def random_blur(img):
-    if np.random.rand() < 0.2:
-        ksize = np.random.choice([3, 5])
-        img = cv2.GaussianBlur(img, (ksize, ksize), 0)
-    return img
-
-def preprocess_img(img):
-    img = gaussian_noise(img)
-    img = random_blur(img)
-    return img
-
-def preprocessing_function(x):
-    x = preprocess_img(x)
-    return x
 
 train_datagen = ImageDataGenerator(
-    rescale=1. / 255,
+    rescale=1./255,
     rotation_range=180,
-    width_shift_range=0.18,
-    height_shift_range=0.18,
-    shear_range=0.15,
-    zoom_range=0.15,
-    brightness_range=[0.7, 1.3],
-    channel_shift_range=20.0,
+    width_shift_range=0.16,
+    height_shift_range=0.16,
+    zoom_range=0.18,
+    shear_range=0.09,
     horizontal_flip=True,
     vertical_flip=True,
-    preprocessing_function=preprocessing_function,
-    fill_mode='nearest'
+    brightness_range=(0.6, 1.5),
+    fill_mode='nearest',
+    preprocessing_function=gripper_style_augmentation
 )
 
-val_datagen = ImageDataGenerator(rescale=1. / 255)
+val_datagen = ImageDataGenerator(
+    rescale=1./255
+)
 
-train_generator = train_datagen.flow_from_directory(
+train_gen = train_datagen.flow_from_directory(
     train_dir,
-    target_size=(img_height, img_width),
+    target_size=img_size,
     batch_size=batch_size,
     class_mode='categorical',
     shuffle=True,
     seed=seed
 )
-
-val_generator = val_datagen.flow_from_directory(
+val_gen = val_datagen.flow_from_directory(
     val_dir,
-    target_size=(img_height, img_width),
+    target_size=img_size,
     batch_size=batch_size,
     class_mode='categorical',
-    shuffle=False
+    shuffle=False,
+    seed=seed
 )
 
-base_model = MobileNetV2(
-    include_top=False,
-    input_tensor=Input(shape=(img_height, img_width, 3)),
-    weights='imagenet'
-)
+num_classes = len(train_gen.class_indices)
+class_indices_rev = {v:k for k,v in train_gen.class_indices.items()}
+
+base_model = MobileNetV2(input_shape=img_size+(3,), weights='imagenet', include_top=False)
 base_model.trainable = True
 
 x = base_model.output
 x = GlobalAveragePooling2D()(x)
-x = BatchNormalization()(x)
-x = Dropout(0.4)(x)
-x = Dense(128, activation='relu')(x)
-x = BatchNormalization()(x)
-x = Dropout(0.3)(x)
-outputs = Dense(num_classes, activation='softmax')(x)
+x = Dropout(0.44)(x)
+pred = Dense(num_classes, activation='softmax')(x)
+model = Model(inputs=base_model.input, outputs=pred)
 
-model = Model(inputs=base_model.input, outputs=outputs)
-
-optimizer = Adam(learning_rate=1e-4)
 model.compile(
-    optimizer=optimizer,
+    optimizer=tf.keras.optimizers.Adam(1e-4),
     loss='categorical_crossentropy',
     metrics=['accuracy']
 )
 
 checkpoint = ModelCheckpoint(
-    filepath='best_model_colab.keras',
-    save_best_only=True,
-    monitor='val_accuracy',
-    mode='max',
-    verbose=1
+    best_model_path, 
+    monitor='val_accuracy', 
+    verbose=1, 
+    save_best_only=True, 
+    save_weights_only=False, 
+    mode='max'
 )
-final_checkpoint = ModelCheckpoint(
-    filepath='final_model_colab.keras',
-    save_best_only=False,
-    monitor='val_accuracy',
-    mode='max',
-    verbose=1
-)
-csv_logger = CSVLogger('history_colab.csv')
+csv_logger = CSVLogger(csv_logger_path, append=False)
 reduce_lr = ReduceLROnPlateau(
-    monitor='val_loss',
-    factor=0.4,
-    patience=4,
-    min_lr=1e-6,
-    verbose=1
-)
-early_stop = EarlyStopping(
-    monitor='val_loss',
-    patience=14,
-    restore_best_weights=True,
+    monitor='val_loss', 
+    factor=0.5, 
+    patience=6, 
+    min_lr=1e-6, 
     verbose=1
 )
 
-callbacks = [checkpoint, final_checkpoint, csv_logger, reduce_lr, early_stop]
+epochs = 100
+callbacks = [checkpoint, csv_logger, reduce_lr]
 
 history = model.fit(
-    train_generator,
-    validation_data=val_generator,
+    train_gen,
     epochs=epochs,
-    callbacks=callbacks,
-    class_weight=class_weights_dict,
-    verbose=1
+    validation_data=val_gen,
+    callbacks=callbacks
 )
 
-model.save('final_model_colab.keras')
+model.save(final_model_path)
 
-try:
-    model.load_weights('best_model_colab.keras')
-except Exception:
-    pass
-
-if os.path.isdir(raw_dataset_dir):
-    raw_gen = val_datagen.flow_from_directory(
+if os.path.exists(raw_dataset_dir) and len(os.listdir(raw_dataset_dir)) > 0:
+    test_gen = val_datagen.flow_from_directory(
         raw_dataset_dir,
-        target_size=(img_height, img_width),
+        target_size=img_size,
         batch_size=1,
-        class_mode='categorical',
-        shuffle=False
+        shuffle=False,
+        class_mode='categorical'
     )
-    y_true = raw_gen.classes
-    y_pred_probs = model.predict(raw_gen, verbose=1)
-    y_pred = np.argmax(y_pred_probs, axis=1)
-    class_indices = raw_gen.class_indices
-    inv_class_indices = dict((v, k) for k, v in class_indices.items())
-
-    report_dict = classification_report(y_true, y_pred, target_names=classes, output_dict=True)
-    macro_f1 = f1_score(y_true, y_pred, average='macro')
-    micro_f1 = f1_score(y_true, y_pred, average='micro')
-    precision = precision_score(y_true, y_pred, average='macro')
-    recall = recall_score(y_true, y_pred, average='macro')
-    cm = confusion_matrix(y_true, y_pred)
-    unknown_idx = class_indices.get('unknown_or_empty')
-    unknown_result = None
-    if unknown_idx is not None:
-        unknown_true = np.sum(np.array(y_true) == unknown_idx)
-        unknown_pred = np.sum(np.array(y_pred) == unknown_idx)
-        unknown_acc = np.mean((np.array(y_true) == unknown_idx) == (np.array(y_pred) == unknown_idx))
-        unknown_result = {'unknown_true': unknown_true, 'unknown_pred': unknown_pred, 'unknown_acc': unknown_acc}
-
-    df_rows = []
-    for c in classes:
-        stats = report_dict[c]
-        row = {
-            'class': c,
-            'precision': stats['precision'],
-            'recall': stats['recall'],
-            'f1-score': stats['f1-score'],
-            'support': stats['support']
-        }
-        df_rows.append(row)
-    macro_micro = {
-        'class': 'ALL',
-        'precision': precision,
-        'recall': recall,
-        'f1-score': macro_f1,
-        'support': np.sum([row['support'] for row in df_rows])
-    }
-    df_rows.append(macro_micro)
-    if unknown_result is not None:
-        for row in df_rows:
-            row.update(unknown_result)
-    df_result = pd.DataFrame(df_rows)
-    df_result.to_csv('random_test_results.csv', index=False)
-    np.savetxt("random_confusion_matrix.csv", cm, delimiter=",", fmt='%d')
-
+    y_prob = model.predict(test_gen, verbose=1)
+    y_pred = np.argmax(y_prob, axis=1)
+    y_true = test_gen.classes
+    fnames = test_gen.filenames
+    y_conf = np.max(y_prob, axis=1)
+    df = pd.DataFrame({
+        'filename': fnames,
+        'true_label': [class_indices_rev[c] for c in y_true],
+        'pred_label': [class_indices_rev[c] for c in y_pred],
+        'confidence': y_conf
+    })
+    df.to_csv(random_test_result_csv, index=False)
 else:
-    print('/raw_dataset 폴더가 없어 랜덤 평가를 건너뜁니다.')
+    with open(random_test_result_csv, 'w') as f:
+        f.write('no raw_dataset present\n')

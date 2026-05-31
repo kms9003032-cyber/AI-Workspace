@@ -4,144 +4,149 @@ import pandas as pd
 import tensorflow as tf
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.applications import MobileNetV2
+from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import GlobalAveragePooling2D, Dense, Dropout
-from tensorflow.keras.callbacks import ModelCheckpoint, CSVLogger, ReduceLROnPlateau, EarlyStopping
-from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import ModelCheckpoint, CSVLogger, ReduceLROnPlateau
 from tensorflow.keras.regularizers import l2
+from sklearn.utils.class_weight import compute_class_weight
+from sklearn.metrics import classification_report, confusion_matrix
 
-base_dir = '/content/drive/MyDrive/4조 응용 기초 설계/chess_piece_ai/dataset'
-train_dir = os.path.join(base_dir, 'train')
-val_dir = os.path.join(base_dir, 'val')
-random_test_dir = os.path.join(base_dir, 'random_test')
+base_dir = "/content/drive/MyDrive/4조 응용 기초 설계/chess_piece_ai/dataset"
+train_dir = os.path.join(base_dir, "train")
+val_dir = os.path.join(base_dir, "val")
+raw_dataset_dir = os.path.join(base_dir, "raw_dataset")
 
-img_height = 224
-img_width = 224
-batch_size = 32
-epochs = 100
+IMG_SIZE = 224
+BATCH_SIZE = 32
+EPOCHS = 100
+DROPOUT_RATE = 0.5
+L2_WEIGHT = 1e-4
+INIT_LR = 1e-3
+
+def strong_contrast(img):
+    img = tf.image.random_contrast(img, lower=0.5, upper=1.7)
+    img = tf.image.random_brightness(img, max_delta=0.3)
+    img = tf.image.random_saturation(img, lower=0.6, upper=1.5)
+    return img
 
 train_datagen = ImageDataGenerator(
-    preprocessing_function=tf.keras.applications.mobilenet_v2.preprocess_input,
+    rescale=1./255,
     rotation_range=180,
-    width_shift_range=0.2,
-    height_shift_range=0.2,
-    shear_range=0.1,
-    zoom_range=0.18,
-    brightness_range=(0.5,1.5),
-    channel_shift_range=20.,
+    width_shift_range=0.15,
+    height_shift_range=0.15,
+    brightness_range=[0.5, 1.5],
+    shear_range=0.12,
+    zoom_range=[0.7, 1.5],
+    channel_shift_range=35.0,
+    fill_mode='nearest',
     horizontal_flip=True,
     vertical_flip=True,
-    fill_mode='nearest'
+    preprocessing_function=strong_contrast
 )
 
-val_datagen = ImageDataGenerator(
-    preprocessing_function=tf.keras.applications.mobilenet_v2.preprocess_input
-)
+val_datagen = ImageDataGenerator(rescale=1./255)
 
-train_generator = train_datagen.flow_from_directory(
+train_gen = train_datagen.flow_from_directory(
     train_dir,
-    target_size=(img_height,img_width),
-    batch_size=batch_size,
-    class_mode='categorical',
-    shuffle=True
+    target_size=(IMG_SIZE, IMG_SIZE),
+    batch_size=BATCH_SIZE,
+    class_mode='categorical'
 )
-
-val_generator = val_datagen.flow_from_directory(
+val_gen = val_datagen.flow_from_directory(
     val_dir,
-    target_size=(img_height,img_width),
-    batch_size=batch_size,
+    target_size=(IMG_SIZE, IMG_SIZE),
+    batch_size=BATCH_SIZE,
     class_mode='categorical',
     shuffle=False
 )
 
-class_indices = train_generator.class_indices
-reverse_class_indices = {v:k for k,v in class_indices.items()}
-num_classes = len(class_indices)
+num_classes = train_gen.num_classes
+class_indices = train_gen.class_indices
+index_to_class = {v: k for k, v in class_indices.items()}
 
-base_model = MobileNetV2(
-    input_shape=(img_height,img_width,3),
-    include_top=False,
-    weights='imagenet'
-)
+labels = []
+for _, y in train_gen:
+    labels.extend(np.argmax(y, axis=1))
+    if len(labels) >= train_gen.samples:
+        break
+class_weights = compute_class_weight(class_weight='balanced', classes=np.arange(num_classes), y=labels)
+class_weights = dict(enumerate(class_weights))
+
+base_model = MobileNetV2(weights='imagenet', include_top=False, input_shape=(IMG_SIZE, IMG_SIZE, 3))
 base_model.trainable = True
-
-fine_tune_at = len(base_model.layers) // 2
-for layer in base_model.layers[:fine_tune_at]:
-    layer.trainable = False
-
 x = base_model.output
 x = GlobalAveragePooling2D()(x)
-x = Dropout(0.4)(x)
-outputs = Dense(num_classes, activation='softmax', kernel_regularizer=l2(0.0005))(x)
-model = Model(inputs=base_model.input, outputs=outputs)
+x = Dropout(DROPOUT_RATE)(x)
+x = Dense(256, activation='relu', kernel_regularizer=l2(L2_WEIGHT))(x)
+x = Dropout(DROPOUT_RATE)(x)
+output = Dense(num_classes, activation='softmax', kernel_regularizer=l2(L2_WEIGHT))(x)
+model = Model(inputs=base_model.input, outputs=output)
 
-optimizer = Adam(learning_rate=0.0005)
-model.compile(optimizer=optimizer, loss='categorical_crossentropy', metrics=['accuracy'])
+model.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=INIT_LR),
+    loss='categorical_crossentropy',
+    metrics=['accuracy']
+)
 
 checkpoint_cb = ModelCheckpoint(
-    'best_model_colab.keras',
+    "best_model_colab.keras",
+    monitor="val_loss",
     save_best_only=True,
-    monitor='val_accuracy',
-    mode='max',
+    save_weights_only=False,
+    mode="min",
     verbose=1
 )
-csv_logger = CSVLogger('history_colab.csv')
-reduce_lr = ReduceLROnPlateau(
-    monitor='val_loss',
-    factor=0.4,
-    patience=3,
-    verbose=1,
-    min_lr=1e-6
-)
-early_stop = EarlyStopping(
-    monitor='val_loss',
-    patience=10,
-    restore_best_weights=True,
+csv_logger_cb = CSVLogger("history_colab.csv")
+reduce_lr_cb = ReduceLROnPlateau(
+    monitor="val_loss",
+    factor=0.3,
+    patience=7,
+    min_lr=1e-6,
     verbose=1
 )
-
-callbacks=[checkpoint_cb, csv_logger, reduce_lr, early_stop]
-
-steps_per_epoch = train_generator.samples // batch_size
-validation_steps = val_generator.samples // batch_size
 
 history = model.fit(
-    train_generator,
-    steps_per_epoch = steps_per_epoch,
-    epochs = epochs,
-    validation_data = val_generator,
-    validation_steps = validation_steps,
-    callbacks=callbacks
+    train_gen,
+    steps_per_epoch=train_gen.samples // BATCH_SIZE,
+    epochs=EPOCHS,
+    validation_data=val_gen,
+    validation_steps=val_gen.samples // BATCH_SIZE,
+    class_weight=class_weights,
+    callbacks=[checkpoint_cb, csv_logger_cb, reduce_lr_cb]
 )
 
-model.save('final_model_colab.keras')
+model.save("final_model_colab.keras")
 
-test_datagen = ImageDataGenerator(
-    preprocessing_function=tf.keras.applications.mobilenet_v2.preprocess_input
-)
-test_generator = test_datagen.flow_from_directory(
-    random_test_dir,
-    target_size=(img_height,img_width),
-    batch_size=1,
-    class_mode=None,
-    shuffle=False
-)
+def evaluate_raw_dataset(model, raw_dir, output_csv):
+    if not os.path.exists(raw_dir):
+        print("raw_dataset 폴더가 없음. 평가 건너뜀.")
+        return
+    raw_datagen = ImageDataGenerator(rescale=1./255)
+    raw_gen = raw_datagen.flow_from_directory(
+        raw_dir,
+        target_size=(IMG_SIZE, IMG_SIZE),
+        batch_size=1,
+        class_mode='categorical',
+        shuffle=False
+    )
+    y_true = raw_gen.classes
+    y_pred_prob = model.predict(raw_gen, steps=raw_gen.samples)
+    y_pred = np.argmax(y_pred_prob, axis=1)
+    filenames = raw_gen.filenames
+    class_labels = list(raw_gen.class_indices.keys())
+    df = pd.DataFrame({
+        'filename': filenames,
+        'true_label': [class_labels[idx] for idx in y_true],
+        'pred_label': [class_labels[idx] for idx in y_pred],
+        'confidence': np.max(y_pred_prob, axis=1)
+    })
+    df.to_csv(output_csv, index=False)
+    report = classification_report(y_true, y_pred, target_names=class_labels, output_dict=True)
+    pd.DataFrame(report).transpose().to_csv(output_csv.replace('.csv', '_report.csv'))
+    cm = confusion_matrix(y_true, y_pred)
+    np.save(output_csv.replace('.csv', '_cm.npy'), cm)
 
-test_filenames = test_generator.filenames
-test_probs = model.predict(test_generator, steps=len(test_generator), verbose=1)
-pred_indices = np.argmax(test_probs, axis=1)
-confidences = np.max(test_probs, axis=1)
-unknown_threshold = 0.5
-pred_labels = []
-for i, conf in enumerate(confidences):
-    if conf < unknown_threshold:
-        pred_labels.append('unknown_or_empty')
-    else:
-        pred_labels.append(reverse_class_indices[pred_indices[i]])
-
-test_results = pd.DataFrame({
-    'filename': test_filenames,
-    'predicted_label': pred_labels,
-    'confidence': confidences
-})
-test_results.to_csv('random_test_results.csv', index=False)
+try:
+    evaluate_raw_dataset(model, raw_dataset_dir, "random_test_results.csv")
+except Exception as e:
+    print("raw_dataset 평가에서 오류 발생:", e)

@@ -1,195 +1,210 @@
 import os
-import numpy as np
-import pandas as pd
+import random
 import tensorflow as tf
-from tensorflow.keras.preprocessing.image import ImageDataGenerator, img_to_array, load_img
+from tensorflow import keras
 from tensorflow.keras.applications import MobileNetV2
 from tensorflow.keras.models import load_model, Model
-from tensorflow.keras.layers import Input, GlobalAveragePooling2D, Dropout, Dense
-from tensorflow.keras.callbacks import CSVLogger, ReduceLROnPlateau, ModelCheckpoint
-from sklearn.utils.class_weight import compute_class_weight
-from sklearn.metrics import classification_report, confusion_matrix
+from tensorflow.keras.layers import GlobalAveragePooling2D, Dropout, Dense
+from tensorflow.keras.preprocessing.image import ImageDataGenerator, img_to_array, load_img
+from tensorflow.keras.callbacks import ReduceLROnPlateau, CSVLogger, ModelCheckpoint
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.regularizers import l2
+import numpy as np
+import pandas as pd
 
 base_dir = '/content/drive/MyDrive/4조 응용 기초 설계/chess_piece_ai/dataset'
 train_dir = os.path.join(base_dir, 'train')
 val_dir = os.path.join(base_dir, 'val')
 raw_test_dir = os.path.join(base_dir, 'raw_dataset')
-model_dir = os.path.join(base_dir, 'models')
-os.makedirs(model_dir, exist_ok=True)
-best_model_path = os.path.join(model_dir, 'best_model_colab.keras')
-final_model_path = os.path.join(model_dir, 'final_model_colab.keras')
-history_csv_path = os.path.join(model_dir, 'history_colab.csv')
-raw_test_csv_path = os.path.join(model_dir, 'random_test_results.csv')
-img_size = 224
-batch_size = 32
-epochs = 100
-seed = 202
+models_dir = os.path.join(base_dir, 'models')
+os.makedirs(models_dir, exist_ok=True)
+best_model_path = os.path.join(models_dir, 'best_model_colab.keras')
+final_model_path = os.path.join(models_dir, 'final_model_colab.keras')
+history_csv_path = os.path.join(base_dir, 'history_colab.csv')
+raw_eval_csv_path = os.path.join(base_dir, 'random_test_results.csv')
+experiment_history_path = os.path.join(base_dir, 'experiment_report.txt')
 
-classes = sorted([d for d in os.listdir(train_dir) if os.path.isdir(os.path.join(train_dir, d))])
-num_classes = len(classes)
+IMG_SIZE = (224, 224)
+BATCH_SIZE = 32
+EPOCHS = 100
+initial_lr = 2e-5
+
+def get_class_labels_and_count(directory):
+    from glob import glob
+    class_names = sorted([d for d in os.listdir(directory) if os.path.isdir(os.path.join(directory, d))])
+    num_classes = len(class_names)
+    return class_names, num_classes
+
+train_labels, num_classes = get_class_labels_and_count(train_dir)
+val_labels, val_num_classes = get_class_labels_and_count(val_dir)
+
+assert set(train_labels) == set(val_labels), "Train/val class set mismatch!"
 
 train_datagen = ImageDataGenerator(
     rescale=1./255,
     rotation_range=180,
-    width_shift_range=0.07,
-    height_shift_range=0.07,
-    zoom_range=0.10,
-    brightness_range=(0.75, 1.25),
+    width_shift_range=0.15,
+    height_shift_range=0.15,
+    zoom_range=0.12,
+    shear_range=0.05,
+    brightness_range=[0.75, 1.18],
     horizontal_flip=True,
     vertical_flip=False,
-    fill_mode="nearest"
+    fill_mode='nearest'
 )
+
 val_datagen = ImageDataGenerator(
     rescale=1./255
 )
 
-train_gen = train_datagen.flow_from_directory(
+train_generator = train_datagen.flow_from_directory(
     train_dir,
-    target_size=(img_size, img_size),
-    batch_size=batch_size,
+    target_size=IMG_SIZE,
+    batch_size=BATCH_SIZE,
     class_mode='categorical',
-    shuffle=True,
-    seed=seed
+    shuffle=True
 )
-val_gen = val_datagen.flow_from_directory(
+
+val_generator = val_datagen.flow_from_directory(
     val_dir,
-    target_size=(img_size, img_size),
-    batch_size=batch_size,
+    target_size=IMG_SIZE,
+    batch_size=BATCH_SIZE,
     class_mode='categorical',
-    shuffle=False,
-    seed=seed
+    shuffle=False
 )
 
-y_train_labels = []
-for cls, idx in train_gen.class_indices.items():
-    dir_path = os.path.join(train_dir, cls)
-    n = len([f for f in os.listdir(dir_path) if (".jpg" in f.lower() or ".jpeg" in f.lower() or ".png" in f.lower())])
-    y_train_labels.extend([idx]*n)
-class_weights_arr = compute_class_weight(class_weight='balanced', classes=np.arange(num_classes), y=y_train_labels)
-class_weight = dict(enumerate(class_weights_arr))
+# class_weights 계산
+from sklearn.utils.class_weight import compute_class_weight
+labels = train_generator.classes
+class_weights_ = compute_class_weight(
+    class_weight='balanced',
+    classes=np.unique(labels),
+    y=labels
+)
+class_weights = dict(enumerate(class_weights_))
 
-initial_lr = 1e-5
-finetune_flag = False
-continue_train = False
-experiment_report = []
-
-if os.path.exists(best_model_path):
-    try:
-        loaded_model = load_model(best_model_path)
-        out_shape = loaded_model.output_shape[-1]
-        if out_shape == num_classes:
-            model = loaded_model
-            for layer in model.layers:
-                layer.trainable = True
-            model.compile(
-                optimizer=tf.keras.optimizers.Adam(learning_rate=initial_lr),
-                loss='categorical_crossentropy',
-                metrics=['accuracy']
-            )
-            val_steps = val_gen.samples // val_gen.batch_size + (val_gen.samples % val_gen.batch_size > 0)
-            prev_eval = model.evaluate(val_gen, steps=val_steps, verbose=0)
-            prev_val_acc = float(prev_eval[1])
-            experiment_report.append(f'Best model found. Continue training with initial val_accuracy={prev_val_acc:.4f}')
-            continue_train = True
-        else:
-            experiment_report.append(f'Output class mismatch: model={out_shape}, data={num_classes}. Starting new model.')
-            continue_train = False
-    except Exception as e:
-        experiment_report.append(f'Error loading best_model_colab.keras: {e}. Starting new model.')
-        continue_train = False
-if not continue_train:
-    base_model = MobileNetV2(include_top=False, weights='imagenet', input_shape=(img_size, img_size, 3))
+# 모델 이어학습 혹은 최초생성
+def load_or_build_model():
+    if os.path.exists(best_model_path):
+        try:
+            loaded_model = load_model(best_model_path, compile=False)
+            if loaded_model.output_shape[-1] == num_classes:
+                print("Continue training from previous best_model_colab.keras")
+                start_acc = None
+                if os.path.exists(history_csv_path):
+                    try:
+                        hist_df = pd.read_csv(history_csv_path)
+                        start_acc = hist_df['val_accuracy'].iloc[-1]
+                    except Exception: pass
+                experiment_text = f'Continue train: loaded best_model_colab.keras, out_classes={num_classes}, prev_best_val_acc={start_acc}\n'
+                with open(experiment_history_path, 'a') as f:
+                    f.write(experiment_text)
+                return loaded_model, True
+        except Exception as e:
+            experiment_text = f'Could not load previous model: {str(e)}. Starting new model.\n'
+            with open(experiment_history_path, 'a') as f:
+                f.write(experiment_text)
+    base_model = MobileNetV2(weights='imagenet', include_top=False, input_shape=(224,224,3))
     base_model.trainable = True
-    inputs = Input(shape=(img_size, img_size, 3))
-    x = base_model(inputs)
-    x = GlobalAveragePooling2D()(x)
-    x = Dropout(0.2)(x)
-    outputs = Dense(num_classes, activation='softmax')(x)
-    model = Model(inputs, outputs)
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=initial_lr),
-        loss='categorical_crossentropy',
-        metrics=['accuracy']
-    )
-    experiment_report.append('Started new MobileNetV2 model. base_model.trainable=True.')
+    x = GlobalAveragePooling2D()(base_model.output)
+    x = Dropout(0.18)(x)
+    x = Dense(128, activation='relu', kernel_regularizer=l2(1e-4))(x)
+    x = Dropout(0.15)(x)
+    out = Dense(num_classes, activation='softmax')(x)
+    model = Model(base_model.input, out)
+    experiment_text = f'New model built. out_classes = {num_classes}\n'
+    with open(experiment_history_path, 'a') as f:
+        f.write(experiment_text)
+    return model, False
 
-csv_logger = CSVLogger(history_csv_path, append=False)
-reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.6, patience=5, min_lr=1e-6, verbose=1, mode='min')
-model_checkpoint = ModelCheckpoint(
-    best_model_path,
-    monitor='val_loss',
-    save_best_only=True,
-    save_weights_only=False,
-    verbose=1,
-    mode='min'
+model, resumed = load_or_build_model()
+optimizer = Adam(learning_rate=initial_lr)
+model.compile(
+    optimizer=optimizer,
+    loss=keras.losses.CategoricalCrossentropy(label_smoothing=0.06),
+    metrics=['accuracy']
 )
-callbacks = [model_checkpoint, csv_logger, reduce_lr]
+
+mc = ModelCheckpoint(
+    best_model_path,
+    monitor='val_accuracy',
+    save_best_only=True,
+    mode='max',
+    save_weights_only=False,
+    verbose=1
+)
+reduce_lr = ReduceLROnPlateau(
+    monitor='val_loss',
+    factor=0.5,
+    patience=6,
+    min_lr=5e-6,
+    verbose=1
+)
+csv_logger = CSVLogger(history_csv_path, append=True if resumed else False)
+
+callbacks = [mc, reduce_lr, csv_logger]
 
 history = model.fit(
-    train_gen,
-    epochs=epochs,
-    validation_data=val_gen,
+    train_generator,
+    validation_data=val_generator,
+    epochs=EPOCHS,
     callbacks=callbacks,
-    class_weight=class_weight
+    class_weight=class_weights,
+    verbose=1
 )
 
 model.save(final_model_path)
 
-try:
+# load best for raw_dataset 평가
+if os.path.exists(best_model_path):
     best_model = load_model(best_model_path)
-except Exception as e:
-    best_model = model
-    experiment_report.append(f'Failed to load best_model for raw_dataset eval, using latest model: {e}')
-
-if os.path.exists(raw_test_dir) and os.path.isdir(raw_test_dir):
-    raw_test_files = [f for f in os.listdir(raw_test_dir) if (".jpg" in f.lower() or ".jpeg" in f.lower() or ".png" in f.lower())]
-    img_shape = (img_size, img_size)
-    raw_results = []
-    if len(raw_test_files) > 0:
-        class_names = {v: k for k, v in train_gen.class_indices.items()}
-        for fname in raw_test_files:
-            fpath = os.path.join(raw_test_dir, fname)
-            try:
-                img = load_img(fpath, target_size=img_shape)
-                arr = img_to_array(img) / 255.
-                arr = np.expand_dims(arr, axis=0)
-                preds = best_model.predict(arr, verbose=0)
-                pred_idx = int(np.argmax(preds))
-                conf = float(np.max(preds))
-                pred_class = class_names[pred_idx]
-                true_class = None
-                for name in classes:
-                    if name in fname:
-                        true_class = name
-                        break
-                is_correct = None
-                if true_class is not None:
-                    is_correct = int(true_class == pred_class)
-                raw_results.append({
-                    'filename': fname,
-                    'true_class': true_class if true_class is not None else '',
-                    'pred_class': pred_class,
-                    'confidence': conf,
-                    'is_correct': is_correct
-                })
-            except Exception as e:
-                raw_results.append({
-                    'filename': fname,
-                    'true_class': '',
-                    'pred_class': 'error',
-                    'confidence': 0.0,
-                    'is_correct': None
-                })
-        pd.DataFrame(raw_results).to_csv(raw_test_csv_path, index=False)
-        if any(r['is_correct'] is not None for r in raw_results):
-            valid = [r for r in raw_results if r['is_correct'] is not None]
-            raw_acc = np.mean([r['is_correct'] for r in valid]) if len(valid) > 0 else 0
-            experiment_report.append(f'raw_dataset 실제 평가 이미지: {len(raw_results)}, 정확도(정답 라벨 추출 기준): {raw_acc:.4f}')
-    else:
-        experiment_report.append('raw_dataset 폴더에는 평가할 이미지가 없음.')
 else:
-    experiment_report.append('raw_dataset 폴더가 없어서 평가를 생략함.')
+    best_model = model
 
-with open(os.path.join(model_dir, 'experiment_report.txt'), 'w') as f:
-    for line in experiment_report:
-        f.write(line + '\n')
+if os.path.exists(raw_test_dir):
+    raw_files = [
+        os.path.join(raw_test_dir, fname)
+        for fname in os.listdir(raw_test_dir)
+        if any(ext in fname.lower() for ext in ['jpg','jpeg','png'])
+    ]
+    results = []
+    class_indices = train_generator.class_indices.copy()
+    inv_class_indices = {v:k for k,v in class_indices.items()}
+    for img_path in raw_files:
+        try:
+            img = load_img(img_path, target_size=IMG_SIZE)
+            arr = img_to_array(img)
+            arr = arr / 255.0
+            arr = np.expand_dims(arr, axis=0)
+            pred = best_model.predict(arr, verbose=0)
+            pred_idx = np.argmax(pred)
+            pred_label = inv_class_indices[pred_idx]
+            confidence = float(np.max(pred))
+        except Exception as e:
+            pred_label = 'error'
+            confidence = 0.0
+        # True label 판단 (filename에 class와 일치하는 경우만)
+        fname = os.path.basename(img_path)
+        matched_true_label = None
+        for c in class_indices:
+            if c in fname:
+                matched_true_label = c
+                break
+        is_correct = (matched_true_label == pred_label) if matched_true_label is not None else None
+        results.append({
+            'filename': fname,
+            'pred_label': pred_label,
+            'confidence': confidence,
+            'true_label': matched_true_label,
+            'is_correct': is_correct
+        })
+    df = pd.DataFrame(results)
+    df.to_csv(raw_eval_csv_path, index=False)
+    corrects = [r['is_correct'] for r in results if r['is_correct'] is not None]
+    accuracy = np.mean(corrects) if corrects else None
+    experiment_line = f'raw_dataset evaluated on {len(raw_files)} images, accuracy={accuracy}\n'
+    with open(experiment_history_path, 'a') as f:
+        f.write(experiment_line)
+else:
+    with open(experiment_history_path, 'a') as f:
+        f.write('raw_dataset folder not found, skipping raw_dataset evaluation\n')

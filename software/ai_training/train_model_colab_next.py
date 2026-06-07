@@ -1,216 +1,170 @@
 import os
 import numpy as np
 import pandas as pd
-from glob import glob
-import tensorflow as tf
-from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.preprocessing.image import ImageDataGenerator, img_to_array, load_img
 from tensorflow.keras.applications import MobileNetV2
-from tensorflow.keras.models import load_model, Model
-from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout, BatchNormalization
+from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout
+from tensorflow.keras.models import Model, load_model
 from tensorflow.keras.callbacks import ModelCheckpoint, CSVLogger, ReduceLROnPlateau
-from sklearn.utils.class_weight import compute_class_weight
-from sklearn.metrics import classification_report, confusion_matrix
-import cv2
+from tensorflow.keras.optimizers import Adam
+import tensorflow as tf
+from collections import Counter
 
 base_dir = '/content/drive/MyDrive/4조 응용 기초 설계/chess_piece_ai/dataset'
 train_dir = os.path.join(base_dir, 'train')
 val_dir = os.path.join(base_dir, 'val')
 raw_test_dir = os.path.join(base_dir, 'raw_dataset')
-img_size = (160, 160)
-batch_size = 32
-epochs = 100
-seed = 27
+BATCH_SIZE = 32
+IMG_SIZE = (224, 224)
+EPOCHS = 100
+SEED = 42
+HISTORY_CSV = 'history_colab.csv'
+RAW_RESULTS_CSV = 'random_test_results.csv'
+CHECKPOINT_FILE = 'best_model_colab.keras'
+FINAL_MODEL_FILE = 'final_model_colab.keras'
+LOG_FILE = 'history_colab.csv'
+experiment_history = []
 
-class_names = sorted(next(os.walk(train_dir))[1])
-num_classes = len(class_names)
-class_indices = {cls: i for i, cls in enumerate(class_names)}
-train_counts = [len(os.listdir(os.path.join(train_dir, cls))) for cls in class_names]
-class_weight = compute_class_weight('balanced', classes=np.arange(num_classes), y=np.concatenate([[i]*n for i, n in enumerate(train_counts)]))
-class_weight = {i:w for i,w in enumerate(class_weight)}
+def calc_class_weights(generator):
+    cls = generator.classes
+    cnt = Counter(cls)
+    max_cnt = float(max(cnt.values()))
+    return {k: max_cnt / v for k, v in cnt.items()}
 
-def strong_augment(x):
-    if np.random.rand() < 0.4:
-        degree = np.random.choice([3, 5])
-        x = cv2.GaussianBlur(x, (degree,degree), 0)
+def strong_augment(img):
+    img = img.astype(np.float32)
+    img += np.random.normal(0, 10, img.shape).astype(np.float32)
     if np.random.rand() < 0.5:
-        rate = np.random.uniform(0.6,1.0)
-        mask = np.random.binomial(1, rate, x.shape)
-        x = x * mask
-    if np.random.rand() < 0.4:
-        factor = np.random.uniform(0.8,1.2)
-        x = x * factor
+        factor = np.random.uniform(0.7,1.3)
+        img = img * factor
     if np.random.rand() < 0.5:
-        y1 = np.random.randint(0, x.shape[0] - 20)
-        x1 = np.random.randint(0, x.shape[1] - 20)
-        x[y1:y1+20,x1:x1+20,:] = 0
-    return np.clip(x,0,255).astype('uint8')
-
-def preprocessing(img):
-    img = img.astype(np.float32)/255.0
-    if np.random.rand()<0.2:
-        noise = np.random.normal(0, 0.03, img.shape)
-        img += noise
-    if np.random.rand()<0.3:
-        y1 = np.random.randint(0, img.shape[0] - 10)
-        x1 = np.random.randint(0, img.shape[1] - 10)
-        img[y1:y1+10,x1:x1+10,:] = 0
-    img = np.clip(img, 0, 1)
-    img = (img*255).astype('uint8')
+        img = img + np.random.uniform(-20,20)
+    img = np.clip(img, 0, 255)
     return img
 
-class CustomGen(tf.keras.utils.Sequence):
-    def __init__(self, gen, unknown_classes, strong_aug_prob=0.21):
-        self.gen = gen
-        self.unknown_classes = unknown_classes
-        self.strong_aug_prob = strong_aug_prob
-        self.class_indices_rev = {v: k for k, v in gen.class_indices.items()}
-    def __len__(self):
-        return len(self.gen)
-    def __getitem__(self, idx):
-        batch_x, batch_y = self.gen[idx]
-        for i in range(len(batch_x)):
-            label_idx = np.argmax(batch_y[i])
-            label_class = self.class_indices_rev[label_idx]
-            if any(unk in label_class for unk in self.unknown_classes):
-                if np.random.rand() < self.strong_aug_prob:
-                    batch_x[i] = strong_augment(batch_x[i])
-            else:
-                batch_x[i] = preprocessing(batch_x[i])
-        batch_x = batch_x.astype('float32')/255.0
-        return batch_x, batch_y
-
-train_idg = ImageDataGenerator(
+train_datagen = ImageDataGenerator(
     rescale=1./255,
     rotation_range=180,
-    width_shift_range=0.13,
-    height_shift_range=0.14,
-    shear_range=0.11,
-    zoom_range=[0.87,1.14],
-    brightness_range=[0.6,1.4],
-    channel_shift_range=22.0,
-    fill_mode='nearest',
+    width_shift_range=0.18,
+    height_shift_range=0.18,
+    shear_range=0.13,
+    zoom_range=0.18,
+    brightness_range=[0.72, 1.32],
+    channel_shift_range=32.0,
     horizontal_flip=True,
-    vertical_flip=True
+    vertical_flip=True,
+    fill_mode='nearest',
+    preprocessing_function=strong_augment
 )
-val_idg = ImageDataGenerator(rescale=1./255)
+val_datagen = ImageDataGenerator(
+    rescale=1./255,
+    brightness_range=[0.92,1.08]
+)
 
-train_gen = train_idg.flow_from_directory(
+train_gen = train_datagen.flow_from_directory(
     train_dir,
-    target_size=img_size,
-    batch_size=batch_size,
+    target_size=IMG_SIZE,
+    batch_size=BATCH_SIZE,
     class_mode='categorical',
     shuffle=True,
-    seed=seed
+    seed=SEED
 )
-val_gen = val_idg.flow_from_directory(
+val_gen = val_datagen.flow_from_directory(
     val_dir,
-    target_size=img_size,
-    batch_size=batch_size,
+    target_size=IMG_SIZE,
+    batch_size=BATCH_SIZE,
     class_mode='categorical',
     shuffle=False,
-    seed=seed
+    seed=SEED
 )
 
-train_gen = CustomGen(train_gen, unknown_classes=['unknown','empty'])
-steps_per_epoch = train_gen.__len__()
-validation_steps = val_gen.n // batch_size
+num_classes = train_gen.num_classes
+class_indices = train_gen.class_indices
+inv_class_indices = {v:k for k,v in class_indices.items()}
+class_weights = calc_class_weights(train_gen)
 
-def build_model(num_classes):
-    base = MobileNetV2(input_shape=img_size+(3,), include_top=False, weights='imagenet')
-    base.trainable = True
-    x = base.output
-    x = GlobalAveragePooling2D()(x)
-    x = BatchNormalization()(x)
-    x = Dense(256, activation='relu')(x)
-    x = Dropout(0.4)(x)
-    x = BatchNormalization()(x)
-    x = Dense(128, activation='relu')(x)
-    x = Dropout(0.25)(x)
-    out = Dense(num_classes, activation='softmax')(x)
-    return Model(base.input, out)
-
-start_from_scratch = False
-load_path = 'best_model_colab.keras'
+initial_model_exists = os.path.exists(CHECKPOINT_FILE)
+load_succeeded = False
 model = None
-experiment_history = []
-if os.path.exists(load_path):
+
+if initial_model_exists:
     try:
-        tm = load_model(load_path)
-        if tm.output_shape[-1]==num_classes:
-            model = tm
-            experiment_history.append('Continued from best_model_colab.keras')
-        else:
-            start_from_scratch = True
-            experiment_history.append('Class count mismatch; new model')
+        temp_model = load_model(CHECKPOINT_FILE)
+        output_shape = temp_model.output.shape[-1]
+        if output_shape == num_classes:
+            model = temp_model
+            load_succeeded = True
+            experiment_history.append({'event':'resume','note':'Resume from existing best_model_colab.keras'})
     except Exception as e:
-        start_from_scratch = True
-        experiment_history.append(f'load_model error: {e}; create new model')
-if model is None or start_from_scratch:
-    model = build_model(num_classes)
-    experiment_history.append('Start from scratch (new MobileNetV2)')
-optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
-model.compile(loss='categorical_crossentropy', optimizer=optimizer, metrics=['accuracy'])
+        experiment_history.append({'event':'fail_resume','note':str(e)})
 
-ckpt = ModelCheckpoint(
-    'best_model_colab.keras',
-    monitor='val_accuracy',
-    save_best_only=True,
-    mode='max',
-    verbose=1
-)
-csv_logger = CSVLogger('history_colab.csv', append=True)
-reduce_lr = ReduceLROnPlateau(
-    monitor='val_loss',
-    factor=0.25,
-    patience=8,
-    min_lr=1e-6,
-    verbose=1,
-    mode='min'
-)
+if not load_succeeded:
+    base_model = MobileNetV2(input_shape=IMG_SIZE+(3,),
+                             include_top=False,
+                             weights='imagenet')
+    base_model.trainable = True
+    x = base_model.output
+    x = GlobalAveragePooling2D()(x)
+    x = Dropout(0.4)(x)
+    output = Dense(num_classes, activation='softmax')(x)
+    model = Model(base_model.input, output)
+    experiment_history.append({'event':'new_model','note':'init new MobileNetV2'})
+    
+optimizer = Adam(learning_rate=1e-3)
+model.compile(optimizer=optimizer, loss='categorical_crossentropy', metrics=['accuracy'])
 
-hist = model.fit(
-    train_gen,
-    epochs=epochs,
-    steps_per_epoch=steps_per_epoch,
-    validation_data=val_gen,
-    validation_steps=validation_steps,
-    class_weight=class_weight,
-    callbacks=[ckpt, csv_logger, reduce_lr],
-    verbose=1,
-    initial_epoch=0
-)
+checkpoint_cb = ModelCheckpoint(CHECKPOINT_FILE, monitor='val_accuracy', save_best_only=True, mode='max', verbose=1)
+csv_logger = CSVLogger(LOG_FILE, append=True)
+reduce_lr_cb = ReduceLROnPlateau(monitor='val_loss', factor=0.36, patience=5, min_lr=5e-6, verbose=1)
 
-model.save('final_model_colab.keras')
-experiment_history_path = 'experiment_history_log.txt'
-with open(experiment_history_path, 'a') as f:
-    for line in experiment_history:
-        f.write(f"{line}\n")
+try:
+    history = model.fit(
+        train_gen,
+        epochs=EPOCHS,
+        validation_data=val_gen,
+        class_weight=class_weights,
+        callbacks=[checkpoint_cb, csv_logger, reduce_lr_cb]
+    )
+    pd.DataFrame(history.history).to_csv(HISTORY_CSV, index=False)
+except Exception as e:
+    experiment_history.append({'event':'fit_exception','note':str(e)})
 
-history_df = pd.DataFrame(hist.history)
-history_df.to_csv('history_colab.csv', mode='a', index=False)
+try:
+    model = load_model(CHECKPOINT_FILE)
+except:
+    pass
+
+try:
+    model.save(FINAL_MODEL_FILE)
+except:
+    pass
+
+def is_image_file(fn):
+    ext = fn.lower().split('.')[-1]
+    return ext in ['jpg','jpeg','png']
 
 if os.path.isdir(raw_test_dir):
-    allow_ext = ('.jpg','.jpeg','.png','.JPG','.PNG','.JPEG')
-    img_files = []
-    for f in os.listdir(raw_test_dir):
-        if f.lower().endswith(('.jpg','.jpeg','.png')):
-            img_files.append(os.path.join(raw_test_dir, f))
-    results = []
-    for fp in img_files:
-        try:
-            img = cv2.imread(fp)
-            if img is None: continue
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            img = cv2.resize(img, img_size)
-            arr = img.astype('float32') / 255.0
-            arr = np.expand_dims(arr,0)
-            prob = model.predict(arr, verbose=0)[0]
-            pred_idx = np.argmax(prob)
-            pred_class = class_names[pred_idx]
-            conf = float(prob[pred_idx])
-            results.append({'file':fp,'pred_label':pred_class,'confidence':conf})
-        except Exception as e:
-            results.append({'file':fp,'pred_label':'error','confidence':-1})
-    pd.DataFrame(results).to_csv('random_test_results.csv',index=False)
+    raw_fnames = [f for f in os.listdir(raw_test_dir) if is_image_file(f)]
+    if len(raw_fnames)>0:
+        results = []
+        for fname in raw_fnames:
+            fpath = os.path.join(raw_test_dir, fname)
+            try:
+                img = load_img(fpath, target_size=IMG_SIZE)
+                arr = img_to_array(img)/255.0
+                arr = np.expand_dims(arr,0)
+                pred = model.predict(arr,verbose=0)[0]
+                pred_idx = np.argmax(pred)
+                pred_class = inv_class_indices[pred_idx]
+                confidence = float(pred[pred_idx])
+                results.append({'filename':fname,'pred_class':pred_class,
+                                'confidence':confidence})
+            except Exception as e:
+                results.append({'filename':fname,'pred_class':'error','confidence':-1,'error':str(e)})
+        df_r = pd.DataFrame(results)
+        df_r.to_csv(RAW_RESULTS_CSV,index=False)
 else:
-    pass
+    experiment_history.append({'event':'skip_raw_dataset_evaluation','note':'No raw_dataset directory'})
+
+if experiment_history:
+    pd.DataFrame(experiment_history).to_csv("experiment_history.csv",index=False)
